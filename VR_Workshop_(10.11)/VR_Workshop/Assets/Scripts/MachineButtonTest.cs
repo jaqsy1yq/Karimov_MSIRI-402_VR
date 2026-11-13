@@ -5,11 +5,11 @@ public class MachineButtonTest : MonoBehaviour
 {
     public void StartMachineTest()
     {
-        Debug.Log("Пуск нажат");
+        Debug.Log("РџСѓСЃРє РЅР°Р¶Р°С‚");
     }
 
     public void StopMachineTest()
     {
-        Debug.Log("Стоп нажат");
+        Debug.Log("РЎС‚РѕРї РЅР°Р¶Р°С‚");
     }
 }

@@ -1,294 +1,344 @@
 using System.Collections;
+using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
+using UnityEngine.UI;
 
-/// <summary>
-/// Local CNC training cycle for the 12.11 VR assignment.
-/// Does NOT send HTTP requests or control a physical machine.
-/// Keep MachineClient enabled separately for read-only GET telemetry.
-/// </summary>
+// Учебный цикл на фрезерном станке (12.11–13.11).
+// 9 шагов по порядку, на каждом разрешено только своё действие.
+// Ошибки снимают баллы (из 100), в конце показываются время, баллы и список ошибок.
+// Сценарий работает только в Unity и не отправляет команды на сервер станка.
 public class MachineTrainer : MonoBehaviour
 {
-    [Header("Scene references")]
-    public Transform blank;
-    public Rigidbody blankBody;
-    public Renderer blankRenderer;
-    public Transform blankHome;
-    public Transform workPoint;
-    public Transform outputPoint;
+    public enum Stage
+    {
+        Welcome = 1,     // ознакомление с рабочим местом
+        CheckMachine,    // проверка станка
+        TakeBlank,       // взять заготовку
+        LoadBlank,       // установить заготовку в тиски
+        CloseGuard,      // закрыть защитный щиток
+        Ready,           // пуск
+        Processing,      // фрезерование
+        Unload,          // снять деталь и отнести на стол готовых деталей
+        Complete         // итог
+    }
+
+    [Header("Заготовка и точки")]
+    public TrainingBlank blank;
+    public Transform blankHome;     // место на столе заготовок
+    public Transform workPoint;     // место в тисках станка
+    public Transform outputPoint;   // место на столе готовых деталей
     public BoxCollider workZone;
     public BoxCollider outputZone;
-    public Transform movingNode;
 
-    [Header("Separate training UI (NOT MachinePanel fields)")]
-    public TMP_Text stageText;
-    public TMP_Text hintText;
-    public TMP_Text resultText;
+    [Header("Узлы станка")]
+    public Transform spindle;       // шпиндель: опускается на заготовку
+    public Transform cutter;        // фреза: вращается во время работы
+    public Transform table;         // стол: подача вдоль оси X
+    public float plunge = 0.08f;    // глубина опускания шпинделя, м
+    public float feed = 0.15f;      // ход стола в каждую сторону, м
+    public float duration = 8f;     // время цикла, с
+    public float cutterSpeed = 900f;
 
-    [Header("Training settings")]
-    [Min(0.2f)] public float duration = 5f;
-    [Min(0f)] public float travel = 0.12f;
-    public Vector3 localTravelAxis = Vector3.up;
-    public bool requireGuard = false;
-    public bool guardClosed = false;
-    public GameObject guardObject;
+    [Header("Защитный щиток")]
+    public Transform guard;         // прозрачный щиток, опускается перед пуском
+    public float guardDrop = 0.45f;
+    public bool guardClosed;
 
-    [Header("Desktop-only testing")]
-    public bool enableDesktopTests = true;
+    [Header("Пульт оператора")]
+    public TMP_Text stepText;       // «Шаг 3 из 9»
+    public TMP_Text stageText;      // название шага
+    public TMP_Text hintText;       // что делать
+    public TMP_Text scoreText;      // баллы и время
+    public TMP_Text resultText;     // итог
+    public Image[] stepCells;       // 9 клеток прогресса: пройдено – зелёная, текущий – оранжевая
+    public Image guardLamp;         // лампа щитка: красная – открыт, зелёная – закрыт
 
-    private enum Stage { Welcome, CheckMachine, LoadBlank, Ready, Processing, Output, Complete }
-    private Stage stage = Stage.Welcome;
-    private Coroutine runningCycle;
-    private Vector3 nodeStart;
-    private Vector3 blankStart;
-    private Quaternion blankStartRotation;
-    private Color originalColor;
-    private Material blankMaterial;
-    private bool blankHeld;
+    public Color rawColor = new Color(0.72f, 0.74f, 0.78f);
+    public Color doneColor = new Color(0.25f, 0.55f, 0.95f);
 
-    // TrainingBlank queries this before allowing a VR grab.
-    public bool CanGrabBlank => (stage == Stage.LoadBlank || stage == Stage.Output) && runningCycle == null;
+    public Stage Current { get; private set; }
+    public bool CanGrabBlank => Current == Stage.TakeBlank || Current == Stage.LoadBlank || (Current == Stage.Unload && !guardClosed);
 
-    private void Awake()
+    private readonly Dictionary<string, int> mistakes = new Dictionary<string, int>();
+    private Coroutine cycle, guardMove;
+    private Vector3 spindleStart, tableStart, guardOpenPos;
+    private float startTime, lastPress = -1f;
+    private bool loaded, milled;
+
+    private void Start()
     {
-        if (movingNode != null) nodeStart = movingNode.localPosition;
-        if (blank != null)
+        if (blank == null || blankHome == null || workPoint == null || outputPoint == null ||
+            workZone == null || outputZone == null || spindle == null || table == null || guard == null)
         {
-            blankStart = blankHome != null ? blankHome.position : blank.position;
-            blankStartRotation = blankHome != null ? blankHome.rotation : blank.rotation;
+            Debug.LogError("MachineTrainer: не все ссылки заполнены в Inspector");
+            enabled = false;
+            return;
         }
-        if (blankRenderer != null)
-        {
-            blankMaterial = blankRenderer.material;  // unique runtime instance
-            originalColor = blankMaterial.color;
-        }
-        ShowStage("Ознакомление", "Нажмите 'Далее', чтобы проверить станок.");
-        ShowResult("Результат: не выполнено");
+        blank.trainer = this;
+        spindleStart = spindle.localPosition;
+        tableStart = table.localPosition;
+        guardOpenPos = guard.localPosition;
+        RestartTraining();
+    }
+
+    private void Update()
+    {
+        if (Current != Stage.Complete) ShowScore();
+    }
+
+    // ---------- кнопки пульта ----------
+
+    private bool Pressed()
+    {
+        // одна кнопка не срабатывает дважды за одно нажатие
+        if (Time.unscaledTime - lastPress < 0.3f) return false;
+        lastPress = Time.unscaledTime;
+        return true;
     }
 
     public void NextStep()
     {
-        if (stage == Stage.Welcome)
+        if (!Pressed()) return;
+        if (Current == Stage.Welcome) GoTo(Stage.CheckMachine);
+        else if (Current == Stage.CheckMachine)
         {
-            stage = Stage.CheckMachine;
-            ShowStage("Проверка станка", "Проверьте рабочую зону и нажмите 'Далее'.");
+            if (guardClosed) Hint("Перед установкой заготовки щиток должен быть поднят.");
+            else if (spindle.localPosition != spindleStart) Hint("Шпиндель должен быть в верхнем положении.");
+            else GoTo(Stage.TakeBlank);
         }
-        else if (stage == Stage.CheckMachine)
-        {
-            stage = Stage.LoadBlank;
-            ShowStage("Установка", "Возьмите заготовку и отпустите в WorkZone.");
-        }
-        else
-        {
-            ShowHint("Продолжайте текущий этап, а не нажимайте 'Далее'.");
-        }
-    }
-
-    // Called by TrainingBlank (replaces Throwable in the 12.11 assignment).
-    public void NotifyPickedUp()
-    {
-        // Hand keeps the rigidbody kinematic while attached.
-        blankHeld = true;
-    }
-
-    public void NotifyBlankReleased()
-    {
-        blankHeld = false;
-        if (blank == null) return;
-
-        if (stage == Stage.LoadBlank)
-        {
-            if (!IsInside(workZone, blank.position))
-            {
-                ShowHint("Отпустите заготовку внутри рабочей зоны.");
-                return;
-            }
-            if (!SnapTo(workPoint)) return;
-            stage = Stage.Ready;
-            ShowStage("Готовность", "Заготовка установлена. Нажмите 'Пуск'.");
-        }
-        else if (stage == Stage.Output)
-        {
-            if (!IsInside(outputZone, blank.position))
-            {
-                ShowHint("Перенесите готовую деталь в OutputZone.");
-                return;
-            }
-            if (!SnapTo(outputPoint)) return;
-            stage = Stage.Complete;
-            ShowStage("Обучение завершено", "Нажмите 'Повторить' для нового цикла.");
-            ShowResult("Результат: успешно");
-        }
-    }
-
-    public void StartCycle()
-    {
-        if (stage == Stage.Processing || runningCycle != null)
-        {
-            ShowHint("Цикл уже выполняется.");
-            return;
-        }
-        if (stage != Stage.Ready || blankHeld)
-        {
-            ShowHint("Пуск запрещён: сначала установите и отпустите заготовку.");
-            return;
-        }
-        if (requireGuard && !guardClosed)
-        {
-            ShowHint("Пуск запрещён: закройте ограждение.");
-            return;
-        }
-        if (movingNode == null)
-        {
-            ShowHint("Ошибка: не задан MovingNode.");
-            return;
-        }
-        runningCycle = StartCoroutine(RunCycle());
-    }
-
-    public void StopCycle()
-    {
-        if (runningCycle == null)
-        {
-            ShowHint("Станок уже остановлен.");
-            return;
-        }
-        StopCoroutine(runningCycle);
-        runningCycle = null;
-        movingNode.localPosition = nodeStart;
-        stage = Stage.Ready;
-        ShowStage("Цикл остановлен", "Можно снова нажать 'Пуск'.");
+        else Mistake("Лишнее нажатие «Далее»", "Кнопка «Далее» нужна только на шагах 1 и 2.");
     }
 
     public void ToggleGuard()
     {
-        if (runningCycle != null)
+        if (!Pressed()) return;
+        if (Current == Stage.Processing)
         {
-            ShowHint("Нельзя открывать ограждение во время цикла.");
+            // щиток открыли во время резания – аварийная остановка
+            StopMilling();
+            MoveGuard(false);
+            Mistake("Щиток открыт во время работы", "Аварийная остановка! Закройте щиток и снова нажмите «Пуск».");
+            GoTo(Stage.CloseGuard, false);
             return;
         }
-        guardClosed = !guardClosed;
-        if (guardObject != null) guardObject.SetActive(guardClosed);
-        ShowHint(guardClosed ? "Ограждение закрыто." : "Ограждение открыто.");
+        if (Current == Stage.CloseGuard && !guardClosed)
+        {
+            MoveGuard(true);
+            GoTo(Stage.Ready);
+            return;
+        }
+        if (Current == Stage.Ready && guardClosed) { MoveGuard(false); GoTo(Stage.CloseGuard); return; }
+        if (Current == Stage.Unload && guardClosed) { MoveGuard(false); Hint("Щиток поднят. Снимите деталь из тисков."); return; }
+        if (!guardClosed) Mistake("Щиток закрыт не вовремя", "Сначала установите заготовку, потом закрывайте щиток.");
+        else { MoveGuard(false); Hint("Щиток поднят."); }
+    }
+
+    public void StartCycle()
+    {
+        if (!Pressed()) return;
+        if (Current == Stage.Processing) { Mistake("Повторный пуск", "Станок уже работает."); return; }
+        if (!loaded || blank.Held) { Mistake("Пуск без заготовки", "Пуск запрещён: заготовка не установлена в тиски."); return; }
+        if (!guardClosed) { Mistake("Пуск с открытым щитком", "Пуск запрещён: закройте защитный щиток."); return; }
+        if (Current != Stage.Ready) { Hint("Сейчас пуск не нужен."); return; }
+        GoTo(Stage.Processing);
+        cycle = StartCoroutine(Milling());
+    }
+
+    public void StopCycle()
+    {
+        if (!Pressed()) return;
+        if (Current != Stage.Processing) { Hint("Станок не работает."); return; }
+        StopMilling();
+        GoTo(Stage.Ready, false);
+        Hint("Станок остановлен. Заготовка в тисках, можно снова нажать «Пуск».");
     }
 
     public void RestartTraining()
     {
-        if (blankHeld)
+        if (blank.Held) { Hint("Сначала отпустите заготовку, потом нажмите «Заново»."); return; }
+        StopMilling();
+        if (guardMove != null) StopCoroutine(guardMove);
+        guard.localPosition = guardOpenPos;
+        guardClosed = false;
+        loaded = milled = false;
+        mistakes.Clear();
+        blank.PlaceAt(blankHome, false);
+        blank.Paint(rawColor);
+        startTime = Time.time;
+        if (resultText) resultText.text = "";
+        GoTo(Stage.Welcome);
+    }
+
+    // ---------- сообщения от заготовки ----------
+
+    public void NotifyPickedUp()
+    {
+        if (Current == Stage.TakeBlank) GoTo(Stage.LoadBlank);
+        else if (Current == Stage.Unload) Hint("Отнесите деталь на стол готовых деталей (зелёная метка) и отпустите.");
+    }
+
+    public void NotifyBlankReleased()
+    {
+        Vector3 p = blank.transform.position;
+        if (Current == Stage.LoadBlank)
         {
-            ShowHint("Сначала отпустите предмет, затем повторите.");
-            return;
-        }
-        if (runningCycle != null)
-        {
-            StopCoroutine(runningCycle);
-            runningCycle = null;
-        }
-        if (movingNode != null) movingNode.localPosition = nodeStart;
-        if (blank != null)
-        {
-            if (blankBody != null)
+            if (Inside(workZone, p))
             {
-                blankBody.isKinematic = false;
-                blankBody.useGravity = true;
-                blankBody.linearVelocity = Vector3.zero;
-                blankBody.angularVelocity = Vector3.zero;
+                blank.PlaceAt(workPoint, true);
+                loaded = true;
+                GoTo(Stage.CloseGuard);
             }
-            blank.SetPositionAndRotation(blankStart, blankStartRotation);
+            else Mistake("Заготовка не в тисках", "Заготовка упала мимо тисков. Возьмите её и положите в тиски.");
         }
-        if (blankMaterial != null) blankMaterial.color = originalColor;
-        stage = Stage.Welcome;
-        ShowStage("Ознакомление", "Нажмите 'Далее', чтобы проверить станок.");
-        ShowResult("Результат: не выполнено");
-    }
-
-    // Only for testing in Game view without a VR headset.
-    public void DesktopPlaceBlank()
-    {
-        if (!enableDesktopTests || stage != Stage.LoadBlank) return;
-        if (!SnapTo(workPoint)) return;
-        stage = Stage.Ready;
-        ShowStage("Готовность", "Тест: заготовка установлена. Нажмите 'Пуск'.");
-    }
-
-    public void DesktopDeliverBlank()
-    {
-        if (!enableDesktopTests || stage != Stage.Output) return;
-        if (!SnapTo(outputPoint)) return;
-        stage = Stage.Complete;
-        ShowStage("Обучение завершено", "Тест пройден. Нажмите 'Повторить'.");
-        ShowResult("Результат: успешно (тест ПК)");
-    }
-
-    private IEnumerator RunCycle()
-    {
-        stage = Stage.Processing;
-        ShowStage("Обработка", "Идёт учебный цикл. Не извлекайте заготовку.");
-        float elapsed = 0f;
-        float cycleDuration = Mathf.Max(0.2f, duration);
-        Vector3 delta = localTravelAxis.normalized * Mathf.Max(0f, travel);
-
-        while (elapsed < cycleDuration)
+        else if (Current == Stage.Unload && milled)
         {
-            elapsed += Time.deltaTime;
-            float progress = Mathf.Clamp01(elapsed / cycleDuration);
-            // Smooth outward and return, ending precisely at initial local position.
-            float amplitude = Mathf.Sin(progress * Mathf.PI);
-            movingNode.localPosition = nodeStart + delta * amplitude;
+            if (Inside(outputZone, p))
+            {
+                blank.PlaceAt(outputPoint, true);
+                GoTo(Stage.Complete);
+                ShowResult();
+            }
+            else Mistake("Деталь не на столе готовых", "Положите готовую деталь на стол готовых деталей.");
+        }
+    }
+
+    // ---------- фрезерование ----------
+
+    private IEnumerator Milling()
+    {
+        float t = 0f;
+        while (t < duration)
+        {
+            t += Time.deltaTime;
+            float k = Mathf.Clamp01(t / duration);
+            // шпиндель опускается в начале и поднимается в конце, стол делает проход туда и обратно
+            float down = Mathf.Clamp01(Mathf.Min(k, 1f - k) * 6f) * plunge;
+            float x = Mathf.Sin(k * Mathf.PI * 2f) * feed;
+            spindle.localPosition = spindleStart + Vector3.down * down;
+            table.localPosition = tableStart + Vector3.right * x;
+            if (cutter) cutter.Rotate(Vector3.up, cutterSpeed * Time.deltaTime, Space.World);
             yield return null;
         }
-        movingNode.localPosition = nodeStart;
-        runningCycle = null;
-        if (blankMaterial != null) blankMaterial.color = Color.green;
-        stage = Stage.Output;
-        ShowStage("Обработка завершена", "Возьмите деталь и отпустите в OutputZone.");
-        ShowResult("Обработка завершена. Деталь готова.");
+        cycle = null;
+        StopMilling();
+        milled = true;
+        loaded = false;
+        blank.Paint(doneColor);
+        GoTo(Stage.Unload);
     }
 
-    // Fix the released object exactly to its docking point.
-    // Unlike a thrown object, the training part must not drift away after docking.
-    private bool SnapTo(Transform target)
+    private void StopMilling()
     {
-        if (target == null || blank == null)
-        {
-            ShowHint("Ошибка: не назначена точка установки.");
-            return false;
-        }
-        if (blankBody != null)
-        {
-            blankBody.linearVelocity = Vector3.zero;
-            blankBody.angularVelocity = Vector3.zero;
-            blankBody.isKinematic = true;
-            blankBody.useGravity = false;
-        }
-        blank.SetPositionAndRotation(target.position, target.rotation);
-        return true;
+        if (cycle != null) { StopCoroutine(cycle); cycle = null; }
+        if (spindle) spindle.localPosition = spindleStart;
+        if (table) table.localPosition = tableStart;
     }
 
-    private static bool IsInside(BoxCollider zone, Vector3 point)
+    private void MoveGuard(bool close)
     {
-        if (zone == null) return false;
+        guardClosed = close;
+        if (guardMove != null) StopCoroutine(guardMove);
+        guardMove = StartCoroutine(GuardRoutine(close ? guardOpenPos + Vector3.down * guardDrop : guardOpenPos));
+        if (guardLamp) guardLamp.color = close ? new Color(0.2f, 0.75f, 0.3f) : new Color(0.85f, 0.2f, 0.2f);
+    }
+
+    private IEnumerator GuardRoutine(Vector3 target)
+    {
+        while ((guard.localPosition - target).sqrMagnitude > 0.000001f)
+        {
+            guard.localPosition = Vector3.MoveTowards(guard.localPosition, target, 0.9f * Time.deltaTime);
+            yield return null;
+        }
+        guardMove = null;
+    }
+
+    // ---------- вспомогательное ----------
+
+    private static bool Inside(BoxCollider zone, Vector3 point)
+    {
         Vector3 local = zone.transform.InverseTransformPoint(point) - zone.center;
         Vector3 half = zone.size * 0.5f;
-        return Mathf.Abs(local.x) <= half.x &&
-               Mathf.Abs(local.y) <= half.y &&
-               Mathf.Abs(local.z) <= half.z;
+        return Mathf.Abs(local.x) <= half.x && Mathf.Abs(local.y) <= half.y && Mathf.Abs(local.z) <= half.z;
     }
 
-    private void ShowStage(string title, string hint)
+    private void GoTo(Stage s, bool withHint = true)
     {
-        if (stageText != null) stageText.text = title;
-        ShowHint(hint);
+        Current = s;
+        int n = (int)s;
+        if (stepText) stepText.text = $"Шаг {n} из 9";
+        if (stageText) stageText.text = Title(s);
+        if (stepCells != null)
+            for (int i = 0; i < stepCells.Length; i++)
+                stepCells[i].color = i + 1 < n ? new Color(0.3f, 0.7f, 0.35f) : i + 1 == n ? new Color(0.95f, 0.55f, 0.1f) : new Color(0.3f, 0.33f, 0.38f);
+        if (withHint) Hint(HintFor(s));
+        if (guardLamp && !guardClosed) guardLamp.color = new Color(0.85f, 0.2f, 0.2f);
     }
 
-    private void ShowHint(string value)
+    private void Hint(string text)
     {
-        if (hintText != null) hintText.text = value;
-        Debug.Log("Training: " + value);
+        if (hintText) hintText.text = text;
     }
 
-    private void ShowResult(string value)
+    private void Mistake(string kind, string text)
     {
-        if (resultText != null) resultText.text = value;
+        mistakes.TryGetValue(kind, out int n);
+        mistakes[kind] = n + 1;
+        Hint(text);
+        ShowScore();
+    }
+
+    private int Score()
+    {
+        int total = 0;
+        foreach (var m in mistakes) total += m.Value;
+        return Mathf.Max(0, 100 - total * 10);
+    }
+
+    private void ShowScore()
+    {
+        if (scoreText) scoreText.text = $"Баллы: {Score()}    Время: {Time.time - startTime:F0} с";
+    }
+
+    private void ShowResult()
+    {
+        ShowScore();
+        int total = 0;
+        foreach (var m in mistakes) total += m.Value;
+        string s = total == 0 ? "Без ошибок!" : $"Ошибок: {total}";
+        foreach (var m in mistakes) s += $"\n– {m.Key}: {m.Value}";
+        if (resultText) resultText.text = s;
+    }
+
+    private static string Title(Stage s)
+    {
+        switch (s)
+        {
+            case Stage.Welcome: return "Ознакомление";
+            case Stage.CheckMachine: return "Проверка станка";
+            case Stage.TakeBlank: return "Взять заготовку";
+            case Stage.LoadBlank: return "Установка в тиски";
+            case Stage.CloseGuard: return "Защитный щиток";
+            case Stage.Ready: return "Пуск";
+            case Stage.Processing: return "Фрезерование";
+            case Stage.Unload: return "Снять деталь";
+            default: return "Итог";
+        }
+    }
+
+    private static string HintFor(Stage s)
+    {
+        switch (s)
+        {
+            case Stage.Welcome: return "Осмотрите фрезерный станок, стол заготовок (синяя метка) и стол готовых деталей (зелёная). Нажмите «Далее».";
+            case Stage.CheckMachine: return "Шпиндель вверху, щиток поднят, тиски пустые. Нажмите «Далее».";
+            case Stage.TakeBlank: return "Возьмите заготовку со стола заготовок.";
+            case Stage.LoadBlank: return "Поднесите заготовку к тискам станка и отпустите.";
+            case Stage.CloseGuard: return "Заготовка в тисках. Нажмите «Щиток», чтобы опустить защитный щиток.";
+            case Stage.Ready: return "Щиток закрыт. Нажмите «Пуск».";
+            case Stage.Processing: return "Идёт фрезерование. Не открывайте щиток до остановки.";
+            case Stage.Unload: return "Готово. Поднимите щиток кнопкой «Щиток», возьмите деталь и отнесите на стол готовых деталей.";
+            default: return "Обучение пройдено. «Заново» – пройти ещё раз.";
+        }
     }
 }

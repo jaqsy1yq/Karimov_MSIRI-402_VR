@@ -1,32 +1,31 @@
 using UnityEngine;
 using Valve.VR.InteractionSystem;
 
-// VR training part for the 12.11 assignment.
-// Replace (remove) Throwable on VR_Заготовка: never use both together.
+// Заготовка для тренажёра (вместо Throwable).
+// Берётся рукой только тогда, когда это разрешает сценарий MachineTrainer.
+// После отпускания не летит по инерции: сценарий сам решает, куда её поставить.
 [RequireComponent(typeof(Interactable))]
 [RequireComponent(typeof(Rigidbody))]
 public class TrainingBlank : MonoBehaviour
 {
     public MachineTrainer trainer;
+    public bool Held { get; private set; }
+
     private Rigidbody body;
-    private bool held;
-    private Hand activeHand;
+    private Renderer view;
 
     private void Awake()
     {
         body = GetComponent<Rigidbody>();
+        view = GetComponentInChildren<Renderer>();
     }
 
     private void HandHoverUpdate(Hand hand)
     {
-        if (trainer == null || !trainer.CanGrabBlank || held)
-            return;
-
+        if (Held || trainer == null || !trainer.CanGrabBlank) return;
         GrabTypes grab = hand.GetGrabStarting();
-        if (grab == GrabTypes.None)
-            return;
+        if (grab == GrabTypes.None) return;
 
-        // Parent to a hand; kinematic while held, without throw velocity on release.
         Hand.AttachmentFlags flags =
             Hand.AttachmentFlags.ParentToHand |
             Hand.AttachmentFlags.DetachFromOtherHand |
@@ -36,30 +35,70 @@ public class TrainingBlank : MonoBehaviour
 
     private void OnAttachedToHand(Hand hand)
     {
-        held = true;
-        activeHand = hand;
+        Held = true;
         hand.HoverLock(null);
-        if (trainer != null) trainer.NotifyPickedUp();
+        trainer?.NotifyPickedUp();
     }
 
     private void HandAttachedUpdate(Hand hand)
     {
-        if (hand.IsGrabEnding(gameObject))
-            hand.DetachObject(gameObject, true);
+        if (hand.IsGrabEnding(gameObject)) hand.DetachObject(gameObject, true);
     }
 
     private void OnDetachedFromHand(Hand hand)
     {
-        held = false;
-        activeHand = null;
+        Held = false;
         hand.HoverUnlock(null);
-        if (body != null)
+        transform.SetParent(null, true);
+        body.isKinematic = false;
+        body.useGravity = true;
+        body.linearVelocity = Vector3.zero;
+        body.angularVelocity = Vector3.zero;
+        trainer?.NotifyBlankReleased();
+    }
+
+    // Поставить точно в точку. fixedInPlace – закрепить (в тисках или на столе готовых),
+    // заготовка становится дочерней к точке и едет вместе со столом станка.
+    public void PlaceAt(Transform point, bool fixedInPlace)
+    {
+        body.isKinematic = true;
+        body.useGravity = false;
+        transform.SetParent(fixedInPlace ? point : null, true);
+        transform.SetPositionAndRotation(point.position, point.rotation);
+        if (!fixedInPlace)
         {
             body.isKinematic = false;
             body.useGravity = true;
             body.linearVelocity = Vector3.zero;
             body.angularVelocity = Vector3.zero;
         }
-        if (trainer != null) trainer.NotifyBlankReleased();
+    }
+
+    public void Paint(Color c)
+    {
+        if (view) view.material.color = c;
+    }
+
+    // Для ходьбы без шлема: заготовку берут и кладут мышью (DesktopControls).
+    public void DesktopGrab(Transform holder)
+    {
+        Held = true;
+        body.isKinematic = true;
+        body.useGravity = false;
+        transform.SetParent(holder, false);
+        transform.localPosition = Vector3.zero;
+        transform.localRotation = Quaternion.identity;
+        trainer?.NotifyPickedUp();
+    }
+
+    public void DesktopRelease(Vector3 dropPoint)
+    {
+        Held = false;
+        transform.SetParent(null, true);
+        transform.position = dropPoint;
+        body.isKinematic = false;
+        body.useGravity = true;
+        body.linearVelocity = Vector3.zero;
+        trainer?.NotifyBlankReleased();
     }
 }

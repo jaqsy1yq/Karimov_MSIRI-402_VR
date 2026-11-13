@@ -18,11 +18,11 @@ public class MachineTelemetryClient : MonoBehaviour
     {
         if (panel == null)
         {
-            Debug.LogError("Не назначена панель MachinePanel");
+            Debug.LogError("РќРµ РЅР°Р·РЅР°С‡РµРЅР° РїР°РЅРµР»СЊ MachinePanel");
             yield break;
         }
 
-        panel.ShowMessage("Подключение к серверу...");
+        panel.ShowMessage("РџРѕРґРєР»СЋС‡РµРЅРёРµ Рє СЃРµСЂРІРµСЂСѓ...");
 
         while (true)
         {
@@ -45,32 +45,32 @@ public class MachineTelemetryClient : MonoBehaviour
                         float z = GetCoordinate(json, "Z");
 
                         panel.ShowAxes(x, y, z);
-                        panel.ShowMessage("Связь установлена");
+                        panel.ShowMessage("РЎРІСЏР·СЊ СѓСЃС‚Р°РЅРѕРІР»РµРЅР°");
 
                         Debug.Log(
-                            $"Сервер CNC: X={x:F1} мм, " +
-                            $"Y={y:F1} мм, Z={z:F1} мм"
+                            $"РЎРµСЂРІРµСЂ CNC: X={x:F1} РјРј, " +
+                            $"Y={y:F1} РјРј, Z={z:F1} РјРј"
                         );
                     }
                     catch (Exception e)
                     {
                         panel.ShowMessage(
-                            "Ошибка данных - координаты неактуальны"
+                            "РћС€РёР±РєР° РґР°РЅРЅС‹С… - РєРѕРѕСЂРґРёРЅР°С‚С‹ РЅРµР°РєС‚СѓР°Р»СЊРЅС‹"
                         );
 
                         Debug.LogWarning(
-                            "Ошибка JSON: " + e.Message
+                            "РћС€РёР±РєР° JSON: " + e.Message
                         );
                     }
                 }
                 else
                 {
                     panel.ShowMessage(
-                        "Нет связи - координаты неактуальны"
+                        "РќРµС‚ СЃРІСЏР·Рё - РєРѕРѕСЂРґРёРЅР°С‚С‹ РЅРµР°РєС‚СѓР°Р»СЊРЅС‹"
                     );
 
                     Debug.LogWarning(
-                        "Ошибка GET: " + req.error
+                        "РћС€РёР±РєР° GET: " + req.error
                     );
                 }
             }
@@ -85,15 +85,15 @@ public class MachineTelemetryClient : MonoBehaviour
     {
         foreach (JToken section in data["data"])
         {
-            if ((string)section[0] != "Оси Канала " + channel)
+            if ((string)section[0] != "РћСЃРё РљР°РЅР°Р»Р° " + channel)
                 continue;
 
             foreach (JToken row in section[1])
             {
-                if ((string)row[0] == "Перемещение по оси " + axis)
+                if ((string)row[0] == "РџРµСЂРµРјРµС‰РµРЅРёРµ РїРѕ РѕСЃРё " + axis)
                 {
                     string value = ((string)row[1])
-                        .Replace("мм", "")
+                        .Replace("РјРј", "")
                         .Replace(',', '.')
                         .Trim();
 
@@ -105,7 +105,7 @@ public class MachineTelemetryClient : MonoBehaviour
                     if (float.IsNaN(result) ||
                         float.IsInfinity(result))
                         throw new FormatException(
-                            "Некорректная координата " + axis
+                            "РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ РєРѕРѕСЂРґРёРЅР°С‚Р° " + axis
                         );
 
                     return result;
@@ -114,7 +114,7 @@ public class MachineTelemetryClient : MonoBehaviour
         }
 
         throw new FormatException(
-            "Не найдена координата " + axis
+            "РќРµ РЅР°Р№РґРµРЅР° РєРѕРѕСЂРґРёРЅР°С‚Р° " + axis
         );
     }
 }

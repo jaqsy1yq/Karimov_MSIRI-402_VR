@@ -11,21 +11,21 @@ public class MachinePanel : MonoBehaviour
     public void ShowState(MachineState data)
     {
         stateText.text = data.running
-            ? "Работает"
-            : "Остановлен";
+            ? "Р Р°Р±РѕС‚Р°РµС‚"
+            : "РћСЃС‚Р°РЅРѕРІР»РµРЅ";
 
         axesText.text =
-            $"X: {data.x:F1} мм\n" +
-            $"Y: {data.y:F1} мм\n" +
-            $"Z: {data.z:F1} мм";
+            $"X: {data.x:F1} РјРј\n" +
+            $"Y: {data.y:F1} РјРј\n" +
+            $"Z: {data.z:F1} РјРј";
     }
 
     public void ShowAxes(float x, float y, float z)
     {
         axesText.text =
-            $"X: {x:F1} мм\n" +
-            $"Y: {y:F1} мм\n" +
-            $"Z: {z:F1} мм";
+            $"X: {x:F1} РјРј\n" +
+            $"Y: {y:F1} РјРј\n" +
+            $"Z: {z:F1} РјРј";
     }
 
     public void ShowMessage(string message)
